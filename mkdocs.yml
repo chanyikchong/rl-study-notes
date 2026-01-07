@@ -1,10 +1,12 @@
 site_name: RL Study Notes
 site_description: Bilingual Reinforcement Learning study notes for interviews
-site_url: https://example.com/rl-notes
+site_url: https://chanyikchong.github.io/rl-study-notes/
 
 theme:
   name: material
   language: en
+  logo: assets/images/favicon.svg
+  favicon: assets/images/favicon.svg
   features:
     - navigation.tabs
     - navigation.sections
