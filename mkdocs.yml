@@ -1,0 +1,137 @@
+site_name: RL Study Notes
+site_description: Bilingual Reinforcement Learning study notes for interviews
+site_url: https://example.com/rl-notes
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: folder
+      fallback_to_default: true
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+        - locale: zh
+          name: 中文
+          build: true
+          nav_translations:
+            Home: 首页
+            Fundamentals: 基础知识
+            MDP Basics: MDP基础
+            Policy and Value Functions: 策略与价值函数
+            Bellman Equations: 贝尔曼方程
+            Dynamic Programming: 动态规划
+            Policy Evaluation: 策略评估
+            Policy Iteration: 策略迭代
+            Value Iteration: 值迭代
+            Monte Carlo Methods: 蒙特卡洛方法
+            Temporal Difference: 时序差分
+            SARSA: SARSA算法
+            Q-Learning: Q学习
+            Expected SARSA: 期望SARSA
+            Function Approximation: 函数逼近
+            Linear Methods: 线性方法
+            Neural Networks: 神经网络
+            Deep RL: 深度强化学习
+            DQN: DQN算法
+            Policy Gradients: 策略梯度
+            Actor-Critic: Actor-Critic方法
+            PPO: PPO算法
+            Advanced Topics: 高级主题
+            Exploration: 探索策略
+            Advantage Estimation: 优势估计
+            Stability Issues: 稳定性问题
+            Practical Training: 实践训练
+            Interview Questions: 面试题
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+      block_tag: 'div'
+      inline_tag: 'span'
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - assets/javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+extra:
+  alternate:
+    - name: English
+      link: /en/
+      lang: en
+    - name: 中文
+      link: /zh/
+      lang: zh
+
+nav:
+  - Home: index.md
+  - Fundamentals:
+    - MDP Basics: fundamentals/mdp.md
+    - Policy and Value Functions: fundamentals/policy-value.md
+    - Bellman Equations: fundamentals/bellman.md
+  - Dynamic Programming:
+    - Policy Evaluation: dp/policy-evaluation.md
+    - Policy Iteration: dp/policy-iteration.md
+    - Value Iteration: dp/value-iteration.md
+  - Monte Carlo Methods: mc/monte-carlo.md
+  - Temporal Difference:
+    - SARSA: td/sarsa.md
+    - Q-Learning: td/q-learning.md
+    - Expected SARSA: td/expected-sarsa.md
+  - Function Approximation:
+    - Linear Methods: fa/linear.md
+    - Neural Networks: fa/neural.md
+  - Deep RL:
+    - DQN: deep/dqn.md
+    - Policy Gradients: deep/policy-gradients.md
+    - Actor-Critic: deep/actor-critic.md
+    - PPO: deep/ppo.md
+  - Advanced Topics:
+    - Exploration: advanced/exploration.md
+    - Advantage Estimation: advanced/gae.md
+    - Stability Issues: advanced/stability.md
+    - Practical Training: advanced/practical.md
+  - Interview Questions: interview/questions.md

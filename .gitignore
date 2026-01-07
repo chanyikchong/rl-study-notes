@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# MkDocs build
+site/
+
+# Obsidian (separate sync method)
+obsidian-vault/
+rl-notes-vault.zip
+
+# Temporary/cache
+.cache/
+.claude/
+*.log
+
+# QA system generated
+proposals/*.json
+
+# OS files
+.DS_Store
+Thumbs.db
