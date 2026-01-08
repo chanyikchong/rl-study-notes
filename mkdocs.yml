@@ -49,6 +49,7 @@ plugins:
             MDP Basics: MDP基础
             Policy and Value Functions: 策略与价值函数
             Bellman Equations: 贝尔曼方程
+            Computing Value Functions: 计算价值函数
             Dynamic Programming: 动态规划
             Policy Evaluation: 策略评估
             Policy Iteration: 策略迭代
@@ -114,6 +115,7 @@ nav:
     - MDP Basics: fundamentals/mdp.md
     - Policy and Value Functions: fundamentals/policy-value.md
     - Bellman Equations: fundamentals/bellman.md
+    - Computing Value Functions: fundamentals/computing-values.md
   - Dynamic Programming:
     - Policy Evaluation: dp/policy-evaluation.md
     - Policy Iteration: dp/policy-iteration.md
