@@ -8,29 +8,97 @@
 
 ---
 
+## 设计动机：为什么Actor-Critic存在
+
+### REINFORCE的问题
+
+REINFORCE使用完整蒙特卡洛回报：
+
+$$\nabla_\theta J = \mathbb{E}\left[\sum_t \nabla \log \pi_\theta(a_t|s_t) \cdot G_t\right]$$
+
+其中 $G_t = \sum_{k=t}^{T} \gamma^{k-t} r_k$ 是许多随机奖励的总和。
+
+**问题：高方差**
+- $G_t$ 是从 $t$ 到回合结束的所有奖励的总和
+- 每个奖励都有噪声 → 总和方差很大
+- 需要许多样本才能得到可靠的梯度估计
+
+**问题：必须等到回合结束**
+- 需要完整轨迹来计算 $G_t$
+- 对长回合效率低下
+- 不能做在线学习
+
+### Actor-Critic的思想
+
+> **关键洞见**：不用等待观察所有未来奖励，用学习的估计 $V(s)$ 来预测它们！
+
+```
+REINFORCE：使用 G_t = r_t + γr_{t+1} + γ²r_{t+2} + ...  （实际奖励）
+Actor-Critic：使用 r_t + γV(s_{t+1})                    （一个奖励 + 估计）
+```
+
+**权衡：**
+
+| 方面 | REINFORCE | Actor-Critic |
+|------|-----------|--------------|
+| 方差 | 高（许多随机项的总和） | 低（一个奖励 + 估计） |
+| 偏差 | 无偏 | 有偏（如果V错误） |
+| 更新 | 每回合 | 每步 |
+| 样本效率 | 更低 | 更高 |
+
+方差减少的收益通常大于偏差的代价！
+
+### 为什么称为"Actor-Critic"？
+
+- **Actor**：策略 $\pi_\theta(a|s)$ — 决定采取什么动作（"演员"）
+- **Critic**：价值函数 $V_\phi(s)$ — 评估状态有多好（"评论家"）
+
+演员表演，评论家评分。评论家的反馈帮助演员改进！
+
+---
+
 ## 核心定义
 
 ### Actor-Critic架构
 
-**Actor**：策略 \(\pi_\theta(a|s)\) — 决定采取什么动作
-**Critic**：价值函数 \(V_\phi(s)\) 或 \(Q_\phi(s,a)\) — 评估状态/动作有多好
+```
+        状态 s
+           │
+    ┌──────┴──────┐
+    ▼             ▼
+┌───────┐   ┌───────┐
+│ Actor │   │Critic │
+│  π_θ  │   │  V_φ  │
+└───┬───┘   └───┬───┘
+    │           │
+    ▼           ▼
+  动作 a     价值 V(s)
+```
 
-### 为什么结合？
-
-| 纯策略梯度 | 纯基于价值 |
-|---------------------|------------------|
-| 高方差 | 更低方差 |
-| 可以学习随机策略 | 确定性策略 |
-| 只能同策略 | 可以异策略 |
-| 适用于连续动作 | 需要max（离散）|
-
-Actor-Critic获得两者的好处：从critic获得更低方差，从actor获得随机策略。
+**两个独立的学习者：**
+1. Actor学习策略（用策略梯度）
+2. Critic学习价值函数（用TD学习）
 
 ### TD误差作为优势估计
 
 $$\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$
 
-这是优势 \(A^\pi(s_t, a_t)\) 在轨迹上平均时的无偏估计。
+**关键结果**：
+
+$$\mathbb{E}[\delta_t | s_t, a_t] = A^\pi(s_t, a_t)$$
+
+TD误差是优势的**无偏估计**！（见下面的证明）
+
+### 为什么结合？
+
+| 纯策略梯度 | 纯基于价值 | Actor-Critic |
+|------------|------------|--------------|
+| 高方差 | 更低方差 | 低方差（从critic） |
+| 可以随机策略 | 确定性策略 | 可以随机策略 |
+| 只能同策略 | 可以异策略 | 灵活 |
+| 适用连续动作 | 需要max（离散）| 适用连续动作 |
+
+Actor-Critic获得两方面的好处！
 
 ---
 
@@ -40,12 +108,14 @@ $$\delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$
 
 $$\nabla_\theta J \approx \mathbb{E}\left[ \nabla_\theta \log \pi_\theta(a|s) \cdot \hat{A}(s, a) \right]$$
 
-其中 \(\hat{A}\) 是优势估计：
-- **蒙特卡洛**：\(\hat{A} = G_t - V_\phi(s_t)\)
-- **TD(0)**：\(\hat{A} = \delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)\)
+其中 $\hat{A}$ 是优势估计：
+- **蒙特卡洛**：$\hat{A} = G_t - V_\phi(s_t)$（低偏差，高方差）
+- **TD(0)**：$\hat{A} = \delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$（高偏差，低方差）
 - **GAE**：加权组合（见GAE章节）
 
 ### Critic更新（TD学习）
+
+使用半梯度TD：
 
 $$\phi \leftarrow \phi + \alpha_c \cdot \delta_t \cdot \nabla_\phi V_\phi(s_t)$$
 
@@ -53,15 +123,29 @@ $$\phi \leftarrow \phi + \alpha_c \cdot \delta_t \cdot \nabla_\phi V_\phi(s_t)$$
 
 $$L(\phi) = \mathbb{E}\left[ (V_\phi(s) - V^{target})^2 \right]$$
 
-其中 \(V^{target} = r + \gamma V_\phi(s')\) 或 \(G_t\)（蒙特卡洛）。
+其中 $V^{target} = r + \gamma V_\phi(s')$（TD）或 $G_t$（蒙特卡洛）。
 
-### 为什么TD误差估计优势
+### 证明TD误差估计优势（重要！）
 
-$$\mathbb{E}[\delta_t | s_t, a_t] = \mathbb{E}[r_t + \gamma V(s_{t+1}) | s_t, a_t] - V(s_t)$$
+这在面试中经常被问到。
 
-$$= Q^\pi(s_t, a_t) - V^\pi(s_t) = A^\pi(s_t, a_t)$$
+$$\mathbb{E}[\delta_t | s_t, a_t] = \mathbb{E}[r_t + \gamma V^\pi(s_{t+1}) - V^\pi(s_t) | s_t, a_t]$$
 
-所以TD误差是优势的无偏（但有噪声）估计！
+$$= \mathbb{E}[r_t | s_t, a_t] + \gamma \mathbb{E}[V^\pi(s_{t+1}) | s_t, a_t] - V^\pi(s_t)$$
+
+$$= R(s_t, a_t) + \gamma \sum_{s'} P(s'|s_t, a_t) V^\pi(s') - V^\pi(s_t)$$
+
+根据Q函数的定义：
+
+$$Q^\pi(s,a) = R(s,a) + \gamma \sum_{s'} P(s'|s,a) V^\pi(s')$$
+
+所以：
+
+$$\mathbb{E}[\delta_t | s_t, a_t] = Q^\pi(s_t, a_t) - V^\pi(s_t) = A^\pi(s_t, a_t)$$
+
+**关键洞见**：TD误差是优势的无偏估计器！
+
+**注意**：这要求 $V^\pi$ 是正确的。用学习的 $V_\phi$，我们得到有偏估计。
 
 ---
 
@@ -106,30 +190,61 @@ $$= Q^\pi(s_t, a_t) - V^\pi(s_t) = A^\pi(s_t, a_t)$$
 
 1. 全局参数：θ, φ（共享）
 2. 启动 N 个并行工作者
-3. 每个工作者：
-     θ, φ 的本地副本
-     与自己的环境交互
-     收集 T 步经验
-     本地计算梯度
-     应用梯度到全局 θ, φ（异步）
-     同步本地 ← 全局
+
+3. 每个工作者循环：
+     # 同步本地参数
+     θ_local ← θ_global
+     φ_local ← φ_global
+
+     # 收集 n 步经验
+     对 t = 1 到 n：
+         a_t ~ π(·|s_t; θ_local)
+         执行 a_t，观察 r_t, s_{t+1}
+
+     # 计算 n 步回报
+     如果 terminal：R = 0
+     否则：R = V(s_n; φ_local)
+
+     对 t = n-1 到 0：
+         R = r_t + γ R
+         计算优势：A_t = R - V(s_t)
+
+     # 计算梯度
+     dθ = Σ ∇_θ log π(a_t|s_t) · A_t
+     dφ = Σ ∇_φ (R_t - V(s_t))²
+
+     # 异步更新全局参数
+     θ_global ← θ_global + α_θ · dθ
+     φ_global ← φ_global + α_φ · dφ
 ```
 
-**关键好处**：并行工作者提供多样经验，自然探索。
+### A2C vs A3C
+
+| 方面 | A2C（同步） | A3C（异步） |
+|------|-------------|-------------|
+| 更新 | 等所有工作者 | 工作者独立更新 |
+| 批处理 | 是 | 否 |
+| GPU效率 | 更高 | 更低 |
+| 实现 | 更简单 | 更复杂 |
+| 常用 | 是（更稳定） | 较少（不稳定） |
+
+现代实践中，A2C通常优于A3C因为更好的批处理和GPU利用。
 
 ---
 
 ## 常见陷阱
 
-1. **Critic学习太慢**：如果critic差，actor得到噪声梯度。Critic通常需要更高学习率。
+1. **Critic学习太慢**：如果critic差，actor得到噪声梯度。Critic通常需要更高学习率或更多更新。
 
 2. **共享网络问题**：actor/critic共享层可能导致干扰。使用独立网络或小心的架构。
 
-3. **熵崩溃**：策略太快变得确定性。添加熵奖励：\(L = -\log \pi(a|s) \cdot A - \beta H(\pi)\)。
+3. **熵崩溃**：策略太快变得确定性。添加熵奖励：$L = -\log \pi(a|s) \cdot A - \beta H(\pi)$。
 
 4. **Critic目标问题**：critic目标应该包含新的还是旧的价值估计？保持一致。
 
-5. **不处理终止状态**：\(V(s_{terminal}) = 0\)，不要从它自举。
+5. **不处理终止状态**：$V(s_{terminal}) = 0$，不要从它自举。
+
+6. **TD误差梯度泄漏**：actor更新时不要让梯度流过critic。使用 `.detach()`。
 
 ---
 
@@ -180,7 +295,7 @@ for episode in range(1000):
 
 **答案**：从critic获得更低方差。
 
-**解释**：REINFORCE使用完整回合回报 \(G_t\)，它有高方差（许多随机奖励的总和）。Actor-critic使用TD误差 \(\delta_t = r + \gamma V(s') - V(s)\)，只涉及一个奖励加上学习的估计。
+**解释**：REINFORCE使用完整回合回报 $G_t$，它有高方差（许多随机奖励的总和）。Actor-critic使用TD误差 $\delta_t = r + \gamma V(s') - V(s)$，只涉及一个奖励加上学习的估计。
 
 **权衡**：TD误差引入偏差（如果V错误），但方差减少通常获胜。
 
@@ -192,11 +307,13 @@ for episode in range(1000):
 
 **答案**：防止过早收敛到确定性策略，鼓励探索。
 
-**解释**：没有熵奖励，策略梯度推向确定性策略（一个动作获得所有概率）。添加 \(\beta H(\pi)\) 到目标奖励不确定性。
+**解释**：没有熵奖励，策略梯度推向确定性策略（一个动作获得所有概率）。添加 $\beta H(\pi)$ 到目标奖励不确定性。
 
-**实现**：\(\nabla_\theta [\beta H(\pi)] = -\beta \sum_a \pi(a|s) \log \pi(a|s)\)
+**熵公式**：$H(\pi) = -\sum_a \pi(a|s) \log \pi(a|s)$
 
-**常见陷阱**：\(\beta\) 设置太高使策略太随机。太低允许熵崩溃。
+**实现**：目标变成 $L = L_{policy} + \beta H(\pi)$
+
+**常见陷阱**：$\beta$ 设置太高使策略太随机。太低允许熵崩溃。
 </details>
 
 <details markdown="1">
@@ -214,11 +331,11 @@ $$= A^\pi(s_t, a_t)$$
 
 **关键洞见**：TD误差是优势的无偏估计器！
 
-**常见陷阱**：这要求 \(V^\pi\) 是正确的。用学习的 \(V_\phi\)，我们得到有偏估计。
+**常见陷阱**：这要求 $V^\pi$ 是正确的。用学习的 $V_\phi$，我们得到有偏估计。
 </details>
 
 <details markdown="1">
-<summary><strong>问题4（数学）：</strong> A3C如何在没有显式探索奖励的情况下实现探索？</summary>
+<summary><strong>问题4（概念）：</strong> A3C如何在没有显式探索奖励的情况下实现探索？</summary>
 
 **答案**：不同随机种子的并行工作者自然探索状态空间的不同部分。
 
@@ -233,9 +350,9 @@ $$= A^\pi(s_t, a_t)$$
 <summary><strong>问题5（实践）：</strong> 你的actor-critic没有学习。Actor损失在振荡。调试什么？</summary>
 
 **答案**：调试步骤：
-1. **先检查critic**：如果critic差，actor无法学习。训练critic更长，使用更高的α_φ。
-2. **降低α_θ**：Actor学习率太高导致振荡。
-3. **分离TD误差**：不要反向传播actor梯度通过critic。
+1. **先检查critic**：如果critic差，actor无法学习。训练critic更长，使用更高的 $\alpha_\phi$。
+2. **降低 $\alpha_\theta$**：Actor学习率太高导致振荡。
+3. **分离TD误差**：不要反向传播actor梯度通过critic。使用 `.detach()`。
 4. **添加熵奖励**：可能卡在局部最优。
 5. **检查优势符号**：好动作正，坏动作负。
 6. **使用批处理**：单步更新有噪声；尝试n步或批量更新。
@@ -243,6 +360,21 @@ $$= A^\pi(s_t, a_t)$$
 **解释**：大多数actor-critic失败是因为critic质量。坏critic给出噪声梯度。
 
 **常见陷阱**：当问题是critic时责怪actor。
+</details>
+
+<details markdown="1">
+<summary><strong>问题6（概念）：</strong> 为什么A2C现在比A3C更常用？</summary>
+
+**答案**：A2C（同步）比A3C（异步）有几个优势：
+
+1. **更好的GPU利用**：同步批处理允许高效的GPU计算
+2. **更稳定的训练**：没有来自陈旧梯度的不一致
+3. **更简单的实现**：没有复杂的异步同步
+4. **经验上相似的性能**：在大多数任务上表现相当
+
+**解释**：A3C设计于GPU不太普遍时。现代硬件使同步批处理更高效。
+
+**常见陷阱**：认为"异步=更快"。批处理的效率增益通常胜过并行度。
 </details>
 
 ---
@@ -253,6 +385,6 @@ $$= A^\pi(s_t, a_t)$$
 - **Mnih et al. (2016)**, 深度RL的异步方法（A3C）
 - **Konda & Tsitsiklis (2000)**, Actor-Critic算法
 
-**面试需要记忆的**：Actor-Critic架构，TD误差作为优势，A2C vs A3C，熵正则化目的。
+**面试需要记忆的**：Actor-Critic架构，TD误差作为优势的证明，A2C vs A3C，熵正则化目的。
 
 **代码示例**：[actor_critic.py](../../../rl_examples/algorithms/actor_critic.py)
