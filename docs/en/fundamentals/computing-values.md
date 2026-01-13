@@ -2,9 +2,9 @@
 
 ## Interview Summary
 
-Computing value functions seems intractable — they're defined as expectations over infinitely many future trajectories. In practice, RL uses three approaches: **Dynamic Programming** (model-based, iterative Bellman updates), **Monte Carlo** (sample complete episodes, average returns), and **Temporal Difference** (bootstrap using current estimates). For large state spaces, **function approximation** generalizes across states. The key insight: the Bellman equation's recursive structure converts an infinite-horizon problem into tractable one-step updates.
+Computing value functions seems intractable — they're defined as expectations over infinitely many future trajectories. In practice, RL uses three approaches: **Dynamic Programming** (model-based, iterative Bellman updates), **Monte Carlo** (sample complete episodes, average returns), and **Temporal Difference** (bootstrap using current estimates). For **Q-functions**, the same approaches apply but we learn $Q(s,a)$ pairs, enabling model-free control via $\arg\max_a Q(s,a)$. For large state spaces, **function approximation** generalizes across states. The key insight: the Bellman equation's recursive structure converts an infinite-horizon problem into tractable one-step updates.
 
-**What to memorize**: Why naive computation is intractable, DP/MC/TD approaches, bootstrapping concept, bias-variance tradeoff between MC and TD.
+**What to memorize**: Why naive computation is intractable, DP/MC/TD for V and Q, bootstrapping concept, bias-variance tradeoff, why Q enables model-free control.
 
 ---
 
@@ -277,6 +277,131 @@ For each transition (s, a, r, s'):
 
 ---
 
+## Computing Action-Value Functions (Q-functions)
+
+### Why Q-functions?
+
+**V(s) tells you how good a state is, but not which action to take.**
+
+To act optimally, you need to compare actions:
+
+$$\pi^*(s) = \arg\max_a Q^*(s, a)$$
+
+With $Q(s,a)$, you can directly select the best action. With only $V(s)$, you need the model:
+
+$$\pi^*(s) = \arg\max_a \left[ R(s,a) + \gamma \sum_{s'} P(s'|s,a) V^*(s') \right]$$
+
+**Key insight**: Q-learning and DQN learn $Q$ directly, enabling model-free control!
+
+### Q-function Definition
+
+$$Q^\pi(s, a) = \mathbb{E}_\pi\left[\sum_{t=0}^{\infty} \gamma^t r_t \mid s_0 = s, a_0 = a\right]$$
+
+**Difference from V**: The first action $a$ is specified, then follow $\pi$ thereafter.
+
+### Bellman Equation for Q
+
+$$Q^\pi(s, a) = R(s,a) + \gamma \sum_{s'} P(s'|s,a) \sum_{a'} \pi(a'|s') Q^\pi(s', a')$$
+
+**For optimal Q**:
+
+$$Q^*(s, a) = R(s,a) + \gamma \sum_{s'} P(s'|s,a) \max_{a'} Q^*(s', a')$$
+
+### Computing Q: The Three Approaches
+
+#### Dynamic Programming for Q
+
+```
+Initialize Q(s,a) = 0 for all (s,a)
+
+Repeat until convergence:
+    For each (s, a):
+        Q_new(s,a) = R(s,a) + γ × Σ_s' P(s'|s,a) × max_a' Q(s',a')
+    Q = Q_new
+```
+
+**Complexity**: $O(|S|^2 |A|^2)$ — more expensive than computing V!
+
+#### Monte Carlo for Q
+
+```
+Initialize Q(s,a) = 0, counts(s,a) = 0
+
+For each episode:
+    Generate trajectory: s₀, a₀, r₁, s₁, a₁, r₂, ...
+
+    For each (s_t, a_t) pair in trajectory:
+        G_t = r_{t+1} + γr_{t+2} + ...
+        counts(s_t, a_t) += 1
+        Q(s_t, a_t) += (G_t - Q(s_t, a_t)) / counts(s_t, a_t)
+```
+
+**Challenge**: Need to visit all (s,a) pairs — requires exploration!
+
+#### TD Learning for Q (Q-Learning)
+
+$$Q(s, a) \leftarrow Q(s, a) + \alpha \left[ r + \gamma \max_{a'} Q(s', a') - Q(s, a) \right]$$
+
+```
+Initialize Q(s,a) arbitrarily
+
+For each step:
+    Observe state s
+    Choose action a (e.g., ε-greedy)
+    Execute a, observe r, s'
+
+    # Q-learning update
+    Q(s,a) += α × [r + γ × max_a' Q(s',a') - Q(s,a)]
+
+    s = s'
+```
+
+**Key property**: Uses $\max_{a'} Q(s', a')$ — learns optimal Q regardless of exploration policy!
+
+### Q-Learning Example
+
+```
+Simple MDP: State S with 2 actions
+- Action L: reward = 1, stays in S
+- Action R: reward = 5, goes to terminal
+- γ = 0.9, α = 0.1
+
+Initial: Q(S,L) = 0, Q(S,R) = 0
+
+Episode 1, Step 1: Choose R (exploratory)
+  r = 5, terminal
+  Q(S,R) += 0.1 × [5 + 0 - 0] = 0.5
+
+Episode 2, Step 1: Choose L
+  r = 1, stays in S
+  Q(S,L) += 0.1 × [1 + 0.9 × max(Q(S,L), Q(S,R)) - 0]
+         += 0.1 × [1 + 0.9 × 0.5 - 0] = 0.145
+
+Episode 2, Step 2: Choose R
+  Q(S,R) += 0.1 × [5 + 0 - 0.5] = 0.95
+
+After many episodes:
+  Q(S,R) → 5    (immediate reward, then terminal)
+  Q(S,L) → 1 + 0.9×5 = 5.5  (1 now + discounted 5 later)
+
+Optimal policy: Take L first (Q(S,L) > Q(S,R))!
+```
+
+### V vs Q: When to Use Which
+
+| Situation | Use V | Use Q |
+|-----------|-------|-------|
+| **Have model** | ✓ (can derive policy) | ✓ (redundant but works) |
+| **No model, need policy** | ✗ (can't select actions) | ✓ (argmax gives policy) |
+| **Continuous actions** | ✓ (with policy gradient) | ✗ (can't enumerate max) |
+| **Memory-limited** | ✓ ($|S|$ values) | ✗ ($|S| \times |A|$ values) |
+
+**In practice**:
+- DQN, Q-learning → learn Q
+- Actor-Critic, PPO → learn V (critic) + policy (actor)
+
+---
+
 ## Comparison: MC vs TD
 
 | Aspect | Monte Carlo | TD Learning |
@@ -541,6 +666,22 @@ where $T$ is the Bellman operator. Since $\gamma < 1$, the distance between any 
 - **TD** is most flexible — works online, works for continuing tasks, lower variance
 
 **Common pitfall**: Using MC for continuing tasks (infinite episodes) or trying DP without a model.
+</details>
+
+<details markdown="1">
+<summary><strong>Q7 (Conceptual):</strong> Why do we need Q-functions instead of just V-functions?</summary>
+
+**Answer**: Q-functions enable model-free control — selecting actions without knowing the environment dynamics.
+
+**Explanation**:
+- With $V(s)$ alone, to select an action you need: $\arg\max_a [R(s,a) + \gamma \sum_{s'} P(s'|s,a) V(s')]$
+- This requires the model ($P$ and $R$)!
+- With $Q(s,a)$, action selection is simply: $\arg\max_a Q(s,a)$
+- No model needed!
+
+**Key equation**: $\pi^*(s) = \arg\max_a Q^*(s,a)$
+
+**Common pitfall**: Thinking V is always sufficient. For model-free control, Q is essential. That's why Q-learning and DQN are so important.
 </details>
 
 ---
