@@ -68,6 +68,7 @@ plugins:
             Policy Gradients: 策略梯度
             Actor-Critic: Actor-Critic方法
             PPO: PPO算法
+            RL for LLMs: LLM训练的RL方法
             Advanced Topics: 高级主题
             Exploration: 探索策略
             Advantage Estimation: 优势估计
@@ -135,6 +136,7 @@ nav:
     - Policy Gradients: deep/policy-gradients.md
     - Actor-Critic: deep/actor-critic.md
     - PPO: deep/ppo.md
+    - RL for LLMs: deep/llm-rl.md
   - Advanced Topics:
     - Exploration: advanced/exploration.md
     - Advantage Estimation: advanced/gae.md

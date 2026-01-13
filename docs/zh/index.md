@@ -129,6 +129,7 @@
 | [策略梯度](deep/policy-gradients.md) | REINFORCE算法 | **基于策略**, 同策略, 高方差 |
 | [Actor-Critic](deep/actor-critic.md) | A2C, A3C架构 | **混合方法**: 策略(actor) + 价值(critic) |
 | [PPO](deep/ppo.md) | 近端策略优化 | **许多任务的最先进方法** |
+| [LLM训练的RL](deep/llm-rl.md) | TRPO, PPO, DPO, GRPO | **LLM对齐**: RLHF及替代方法 |
 
 **深度RL的演进：**
 ```

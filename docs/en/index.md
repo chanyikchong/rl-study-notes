@@ -129,6 +129,7 @@ Modern RL algorithms:
 | [Policy Gradients](deep/policy-gradients.md) | REINFORCE algorithm | **Policy-based**, on-policy, high variance |
 | [Actor-Critic](deep/actor-critic.md) | A2C, A3C architectures | **Hybrid**: policy (actor) + value (critic) |
 | [PPO](deep/ppo.md) | Proximal Policy Optimization | **State-of-the-art** for many tasks |
+| [RL for LLMs](deep/llm-rl.md) | TRPO, PPO, DPO, GRPO | **LLM alignment**: RLHF and alternatives |
 
 **Progression in Deep RL:**
 ```
