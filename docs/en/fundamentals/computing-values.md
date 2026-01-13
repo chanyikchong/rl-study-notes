@@ -2,9 +2,9 @@
 
 ## Interview Summary
 
-Computing value functions seems intractable — they're defined as expectations over infinitely many future trajectories. In practice, RL uses three approaches: **Dynamic Programming** (model-based, iterative Bellman updates), **Monte Carlo** (sample complete episodes, average returns), and **Temporal Difference** (bootstrap using current estimates). For **Q-functions**, the same approaches apply but we learn $Q(s,a)$ pairs, enabling model-free control via $\arg\max_a Q(s,a)$. For large state spaces, **function approximation** generalizes across states. The key insight: the Bellman equation's recursive structure converts an infinite-horizon problem into tractable one-step updates.
+Computing value functions seems intractable — they're defined as expectations over infinitely many future trajectories. In practice, RL uses three approaches: **Dynamic Programming** (model-based, iterative Bellman updates), **Monte Carlo** (sample complete episodes, average returns), and **Temporal Difference** (bootstrap using current estimates). For **Q-functions**, the same approaches apply but we learn $Q(s,a)$ pairs, enabling model-free control via $\arg\max_a Q(s,a)$. The **Advantage function** $A(s,a) = Q(s,a) - V(s)$ measures how much better an action is than average — crucial for policy gradients. For large state spaces, **function approximation** generalizes across states.
 
-**What to memorize**: Why naive computation is intractable, DP/MC/TD for V and Q, bootstrapping concept, bias-variance tradeoff, why Q enables model-free control.
+**What to memorize**: DP/MC/TD for V and Q, advantage definition and why it reduces variance, TD error as advantage estimate, GAE for bias-variance tradeoff.
 
 ---
 
@@ -402,6 +402,117 @@ Optimal policy: Take L first (Q(S,L) > Q(S,R))!
 
 ---
 
+## The Advantage Function
+
+### Definition
+
+$$A^\pi(s, a) = Q^\pi(s, a) - V^\pi(s)$$
+
+**Meaning**: How much better is action $a$ compared to the average action in state $s$?
+
+- $A(s,a) > 0$: Action $a$ is **better** than average
+- $A(s,a) < 0$: Action $a$ is **worse** than average
+- $A(s,a) = 0$: Action $a$ is exactly average
+
+### Why Advantage Matters
+
+**The problem with raw Q-values in policy gradients**:
+
+Consider a state where all actions give high returns (e.g., near goal):
+- $Q(s, \text{left}) = 95$
+- $Q(s, \text{right}) = 100$
+
+Using Q directly, policy gradient would increase probability of **both** actions (both have positive Q). But right is clearly better!
+
+**Advantage fixes this**:
+- $V(s) = 97.5$ (average)
+- $A(s, \text{left}) = 95 - 97.5 = -2.5$ → decrease probability
+- $A(s, \text{right}) = 100 - 97.5 = +2.5$ → increase probability
+
+Now only the better action is reinforced!
+
+### Key Property: Zero Mean
+
+$$\mathbb{E}_{a \sim \pi}[A^\pi(s, a)] = 0$$
+
+**Proof**:
+
+$$\mathbb{E}_{a \sim \pi}[A^\pi(s, a)] = \mathbb{E}_{a \sim \pi}[Q^\pi(s, a) - V^\pi(s)]$$
+
+$$= \mathbb{E}_{a \sim \pi}[Q^\pi(s, a)] - V^\pi(s)$$
+
+$$= V^\pi(s) - V^\pi(s) = 0$$
+
+This is why advantage works as a baseline — it doesn't bias the gradient!
+
+### Computing Advantage: Three Methods
+
+#### Method 1: From Q and V (Expensive)
+
+$$A(s, a) = Q(s, a) - V(s)$$
+
+**Problem**: Need to learn both Q and V — doubles the work!
+
+#### Method 2: TD Error (Common in Actor-Critic)
+
+$$\hat{A}(s, a) = r + \gamma V(s') - V(s) = \delta_t$$
+
+**Why this works**:
+
+$$\mathbb{E}[\delta_t | s, a] = \mathbb{E}[r + \gamma V(s') | s, a] - V(s) = Q(s,a) - V(s) = A(s,a)$$
+
+The TD error is an **unbiased estimate** of advantage! Only need V, not Q.
+
+**This is why Actor-Critic works**:
+```
+Actor:  Updates policy using advantage (TD error)
+Critic: Learns V(s) only — much simpler than learning Q(s,a)
+```
+
+#### Method 3: GAE (Generalized Advantage Estimation)
+
+Weighted combination of n-step advantages:
+
+$$\hat{A}_t^{GAE(\gamma, \lambda)} = \sum_{l=0}^{\infty} (\gamma \lambda)^l \delta_{t+l}$$
+
+where $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$
+
+| $\lambda$ | Behavior |
+|-----------|----------|
+| 0 | TD(0): $\hat{A} = \delta_t$ (low variance, high bias) |
+| 1 | MC: $\hat{A} = G_t - V(s_t)$ (high variance, low bias) |
+| 0.95-0.99 | Best of both worlds (used in practice) |
+
+### Advantage in Algorithms
+
+| Algorithm | How Advantage is Used |
+|-----------|----------------------|
+| **A2C/A3C** | Policy gradient weighted by TD error $\delta_t$ |
+| **PPO** | Clipped objective uses GAE advantage |
+| **TRPO** | KL-constrained update with advantage |
+| **SAC** | Soft advantage with entropy bonus |
+
+### Example: Why Advantage Reduces Variance
+
+```
+Two trajectories from same state s:
+  Trajectory 1: s → a1 → ... → return = 100
+  Trajectory 2: s → a2 → ... → return = 105
+
+Using returns directly (REINFORCE):
+  ∇J ∝ 100 × ∇log π(a1|s) + 105 × ∇log π(a2|s)
+  Both positive! Both actions reinforced.
+
+Using advantage (with V(s) = 102.5 baseline):
+  ∇J ∝ (100-102.5) × ∇log π(a1|s) + (105-102.5) × ∇log π(a2|s)
+      = -2.5 × ∇log π(a1|s) + 2.5 × ∇log π(a2|s)
+  Now a1 is decreased, a2 is increased!
+```
+
+**The baseline subtracts out the "average goodness" of the state, leaving only the relative quality of actions.**
+
+---
+
 ## Comparison: MC vs TD
 
 | Aspect | Monte Carlo | TD Learning |
@@ -684,6 +795,28 @@ where $T$ is the Bellman operator. Since $\gamma < 1$, the distance between any 
 **Common pitfall**: Thinking V is always sufficient. For model-free control, Q is essential. That's why Q-learning and DQN are so important.
 </details>
 
+<details markdown="1">
+<summary><strong>Q8 (Conceptual):</strong> Why does using advantage instead of Q reduce variance in policy gradients?</summary>
+
+**Answer**: Advantage subtracts out the "average goodness" of a state, so only the relative quality of actions matters.
+
+**Explanation**:
+Consider a state near the goal where all actions have high Q-values:
+- $Q(s, a_1) = 95$, $Q(s, a_2) = 100$
+
+Using Q directly: Both actions get positive updates (both Q > 0), even though $a_1$ is worse!
+
+Using advantage with $V(s) = 97.5$:
+- $A(s, a_1) = 95 - 97.5 = -2.5$ → probability decreased
+- $A(s, a_2) = 100 - 97.5 = +2.5$ → probability increased
+
+**Key property**: $\mathbb{E}[A(s,a)] = 0$ — advantage doesn't bias the gradient, just reduces variance.
+
+**Key equation**: $A(s,a) = Q(s,a) - V(s)$
+
+**Common pitfall**: Thinking you need both Q and V networks. In actor-critic, TD error $\delta = r + \gamma V(s') - V(s)$ is an unbiased estimate of advantage — only V needed!
+</details>
+
 ---
 
 ## References
@@ -692,4 +825,4 @@ where $T$ is the Bellman operator. Since $\gamma < 1$, the distance between any 
 - **Szepesvári (2010)**, Algorithms for Reinforcement Learning
 - **Silver's RL Course**, Lectures 3-4: Dynamic Programming and Model-Free Prediction
 
-**What to memorize for interviews**: The three approaches (DP/MC/TD), bootstrapping definition, bias-variance tradeoff, why Bellman equation makes RL tractable, contraction property for convergence.
+**What to memorize for interviews**: DP/MC/TD for V and Q, advantage formula and why it reduces variance, TD error as advantage estimate, GAE formula, why Q enables model-free control, bias-variance tradeoff.
