@@ -290,6 +290,429 @@ for iteration = 1, 2, ... do:
 ─────────────────────────────────────────────────────────
 ```
 
+### The Complete PPO Actor-Critic Objective (In-Depth)
+
+The full PPO objective combines **three components** into a single loss function:
+
+$$L^{PPO}(\theta, \phi) = L^{CLIP}(\theta) - c_1 L^{VF}(\phi) + c_2 S[\pi_\theta]$$
+
+Where:
+- $L^{CLIP}(\theta)$: **Actor loss** (policy improvement via clipped surrogate)
+- $L^{VF}(\phi)$: **Critic loss** (value function accuracy)
+- $S[\pi_\theta]$: **Entropy bonus** (exploration encouragement)
+- $c_1, c_2$: Hyperparameter coefficients (typically $c_1 = 0.5$, $c_2 = 0.01$)
+
+Let's break down each component in detail.
+
+---
+
+#### Component 1: Actor Loss $L^{CLIP}(\theta)$ — Policy Improvement
+
+$$L^{CLIP}(\theta) = \mathbb{E}_t \left[ \min\left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
+
+**Purpose**: Improve the policy by increasing probability of good actions (positive advantage) and decreasing probability of bad actions (negative advantage), with clipping for stability.
+
+**Components explained**:
+
+| Symbol | Meaning | Formula |
+|--------|---------|---------|
+| $r_t(\theta)$ | Probability ratio | $\frac{\pi_\theta(a_t \| s_t)}{\pi_{\theta_{old}}(a_t \| s_t)}$ |
+| $\hat{A}_t$ | Estimated advantage | Usually GAE: $\sum_{l=0}^{\infty}(\gamma\lambda)^l \delta_{t+l}$ |
+| $\epsilon$ | Clip range | Typically 0.1 or 0.2 |
+
+**Why maximize (not minimize)?** We want to **maximize** expected advantage-weighted returns. In code, we often negate this to create a loss to minimize:
+
+```python
+# In practice, we minimize the negative
+actor_loss = -L_CLIP  # Minimizing negative = maximizing
+```
+
+**The clipping mechanism in detail**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    HOW CLIPPING CREATES A "PESSIMISTIC" BOUND               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+For each (state, action) pair with advantage A:
+
+If A > 0 (good action → want to INCREASE probability):
+┌────────────────────────────────────────────────────────────────────────────┐
+│  Unclipped: r(θ) · A      →  Increases as π_θ(a|s) increases              │
+│  Clipped:   (1+ε) · A     →  Constant ceiling                             │
+│                                                                            │
+│  min(unclipped, clipped):                                                  │
+│    - When r < 1+ε: use unclipped (gradient pushes probability up)         │
+│    - When r > 1+ε: use clipped (no gradient, stop pushing)                │
+│                                                                            │
+│  Result: Probability can increase, but objective stops improving          │
+│          after ratio exceeds 1+ε. Prevents overshooting.                  │
+└────────────────────────────────────────────────────────────────────────────┘
+
+If A < 0 (bad action → want to DECREASE probability):
+┌────────────────────────────────────────────────────────────────────────────┐
+│  Unclipped: r(θ) · A      →  r·A is negative, becomes "less negative"     │
+│                               (better) as π_θ(a|s) decreases              │
+│  Clipped:   (1-ε) · A     →  Constant floor (least negative it can be)    │
+│                                                                            │
+│  min(unclipped, clipped):                                                  │
+│    - When r > 1-ε: use unclipped (gradient pushes probability down)       │
+│    - When r < 1-ε: use clipped (no gradient, stop pushing)                │
+│                                                                            │
+│  Result: Probability can decrease, but objective stops improving          │
+│          after ratio falls below 1-ε. Prevents over-suppression.          │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Mathematical intuition**: The min() operation creates a **pessimistic lower bound** on the true objective. We only take credit for improvement up to the clip boundary.
+
+---
+
+#### Component 2: Critic Loss $L^{VF}(\phi)$ — Value Function Accuracy
+
+$$L^{VF}(\phi) = \mathbb{E}_t \left[ \left( V_\phi(s_t) - V_t^{target} \right)^2 \right]$$
+
+**Purpose**: Train the value function (critic) to accurately predict expected returns, which is essential for computing good advantage estimates.
+
+**What is $V_t^{target}$?** The target value comes from actual experience:
+
+$$V_t^{target} = \hat{A}_t + V_{\phi_{old}}(s_t)$$
+
+Or equivalently, using returns:
+
+$$V_t^{target} = \hat{R}_t = \sum_{l=0}^{T-t} \gamma^l r_{t+l}$$
+
+**Why squared error?** Simple, well-understood, works well in practice. Some implementations use Huber loss for robustness to outliers.
+
+**Optional: Clipped Value Loss**
+
+Some implementations also clip the value function update for stability:
+
+$$L^{VF-CLIP}(\phi) = \mathbb{E}_t \left[ \max\left( (V_\phi - V^{target})^2, (V^{clip} - V^{target})^2 \right) \right]$$
+
+Where $V^{clip} = V_{\phi_{old}} + \text{clip}(V_\phi - V_{\phi_{old}}, -\epsilon, \epsilon)$
+
+```python
+# Clipped value loss implementation
+v_pred = critic(states)
+v_pred_clipped = v_old + torch.clamp(v_pred - v_old, -clip_range, clip_range)
+
+loss_v1 = (v_pred - returns) ** 2
+loss_v2 = (v_pred_clipped - returns) ** 2
+
+critic_loss = 0.5 * torch.mean(torch.max(loss_v1, loss_v2))
+```
+
+**Why clip the critic too?** Prevents the value function from changing too drastically, which could destabilize advantage estimates in subsequent epochs.
+
+---
+
+#### Component 3: Entropy Bonus $S[\pi_\theta]$ — Exploration
+
+$$S[\pi_\theta] = \mathbb{E}_t \left[ -\sum_a \pi_\theta(a|s_t) \log \pi_\theta(a|s_t) \right] = \mathbb{E}_t \left[ H(\pi_\theta(\cdot|s_t)) \right]$$
+
+**Purpose**: Encourage exploration by rewarding policies that maintain uncertainty (don't become too deterministic too quickly).
+
+**Why entropy matters**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     ENTROPY AND EXPLORATION                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+High Entropy (good for exploration):
+┌────────────────────────────────┐
+│  π(a₁|s) = 0.25               │
+│  π(a₂|s) = 0.25               │     H(π) = -4 × 0.25 × log(0.25) = 1.39
+│  π(a₃|s) = 0.25               │     (maximum for 4 actions)
+│  π(a₄|s) = 0.25               │
+└────────────────────────────────┘
+
+Low Entropy (exploitation, may be premature):
+┌────────────────────────────────┐
+│  π(a₁|s) = 0.97               │
+│  π(a₂|s) = 0.01               │     H(π) ≈ 0.12
+│  π(a₃|s) = 0.01               │     (nearly deterministic)
+│  π(a₄|s) = 0.01               │
+└────────────────────────────────┘
+
+The entropy bonus REWARDS high entropy, preventing premature convergence
+to a deterministic policy before sufficient exploration.
+```
+
+**For continuous actions** (Gaussian policy):
+
+$$S[\pi_\theta] = \mathbb{E}_t \left[ \frac{1}{2} \log(2\pi e \sigma^2) \right] = \frac{1}{2}(1 + \log(2\pi\sigma^2))$$
+
+The entropy depends on the standard deviation $\sigma$. Larger $\sigma$ → more exploration.
+
+**Entropy coefficient $c_2$**:
+- Too high: Policy stays random, can't exploit good actions
+- Too low: Policy becomes deterministic too fast, may converge to suboptimal behavior
+- Typical values: 0.01 for discrete actions, 0.001 for continuous
+
+---
+
+#### Putting It All Together: The Combined Loss
+
+$$L^{TOTAL}(\theta, \phi) = -L^{CLIP}(\theta) + c_1 L^{VF}(\phi) - c_2 S[\pi_\theta]$$
+
+Note the signs (assuming we **minimize** the loss):
+- **Negative** $L^{CLIP}$: We want to maximize policy improvement
+- **Positive** $L^{VF}$: We want to minimize value prediction error
+- **Negative** $S$: We want to maximize entropy (encourage exploration)
+
+**Complete Algorithm with All Components**:
+
+```
+Complete PPO Actor-Critic Training Loop:
+═══════════════════════════════════════════════════════════════════════════════
+
+Input: Actor π_θ, Critic V_φ, coefficients c₁, c₂, clip ε, epochs K
+
+for iteration = 1, 2, ... do:
+
+    ┌─ COLLECTION PHASE ──────────────────────────────────────────────────────┐
+    │                                                                         │
+    │  for t = 1 to T do:                                                     │
+    │      Sample action: a_t ~ π_θ_old(·|s_t)                               │
+    │      Store: log π_θ_old(a_t|s_t), V_φ_old(s_t)                         │
+    │      Execute action, observe r_t, s_{t+1}                               │
+    │                                                                         │
+    │  Compute advantages using GAE:                                          │
+    │      δ_t = r_t + γV_φ_old(s_{t+1}) - V_φ_old(s_t)                      │
+    │      Â_t = Σ_{l=0}^{T-t} (γλ)^l δ_{t+l}                                │
+    │                                                                         │
+    │  Compute returns:                                                       │
+    │      R̂_t = Â_t + V_φ_old(s_t)                                          │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌─ OPTIMIZATION PHASE (K epochs on same data) ────────────────────────────┐
+    │                                                                         │
+    │  for epoch = 1 to K do:                                                 │
+    │      for minibatch in shuffle(collected_data) do:                       │
+    │                                                                         │
+    │          ┌─ ACTOR LOSS ──────────────────────────────────────────────┐  │
+    │          │  log π_θ_new = actor.log_prob(actions)                    │  │
+    │          │  ratio = exp(log π_θ_new - log π_θ_old)                   │  │
+    │          │                                                           │  │
+    │          │  surr1 = ratio × Â                                        │  │
+    │          │  surr2 = clip(ratio, 1-ε, 1+ε) × Â                        │  │
+    │          │  L_actor = -mean(min(surr1, surr2))                       │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ CRITIC LOSS ─────────────────────────────────────────────┐  │
+    │          │  V_pred = critic(states)                                  │  │
+    │          │  L_critic = mean((V_pred - R̂)²)                          │  │
+    │          │                                                           │  │
+    │          │  # Optional: clipped value loss                           │  │
+    │          │  V_clipped = V_old + clip(V_pred - V_old, -ε, ε)         │  │
+    │          │  L_critic = mean(max((V_pred-R̂)², (V_clipped-R̂)²))      │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ ENTROPY BONUS ───────────────────────────────────────────┐  │
+    │          │  entropy = actor.entropy(states)                          │  │
+    │          │  L_entropy = -mean(entropy)  # negative to maximize       │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ TOTAL LOSS ──────────────────────────────────────────────┐  │
+    │          │  L_total = L_actor + c₁ × L_critic + c₂ × L_entropy       │  │
+    │          │                                                           │  │
+    │          │  optimizer.zero_grad()                                    │  │
+    │          │  L_total.backward()                                       │  │
+    │          │  optimizer.step()                                         │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+---
+
+#### Complete PyTorch Implementation
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Categorical, Normal
+
+class PPOActorCritic(nn.Module):
+    """Combined Actor-Critic network for PPO."""
+
+    def __init__(self, state_dim, action_dim, hidden_dim=64, continuous=False):
+        super().__init__()
+        self.continuous = continuous
+
+        # Shared feature extractor (optional, can be separate)
+        self.shared = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh()
+        )
+
+        # Actor head
+        if continuous:
+            self.actor_mean = nn.Linear(hidden_dim, action_dim)
+            self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        else:
+            self.actor = nn.Linear(hidden_dim, action_dim)
+
+        # Critic head
+        self.critic = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state):
+        features = self.shared(state)
+        value = self.critic(features)
+
+        if self.continuous:
+            mean = self.actor_mean(features)
+            std = self.actor_log_std.exp()
+            return mean, std, value
+        else:
+            logits = self.actor(features)
+            return logits, value
+
+    def get_action_and_value(self, state, action=None):
+        """Get action, log_prob, entropy, and value."""
+        if self.continuous:
+            mean, std, value = self.forward(state)
+            dist = Normal(mean, std)
+            if action is None:
+                action = dist.sample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            entropy = dist.entropy().sum(dim=-1)
+        else:
+            logits, value = self.forward(state)
+            dist = Categorical(logits=logits)
+            if action is None:
+                action = dist.sample()
+            log_prob = dist.log_prob(action)
+            entropy = dist.entropy()
+
+        return action, log_prob, entropy, value.squeeze(-1)
+
+
+def compute_ppo_loss(
+    model: PPOActorCritic,
+    states: torch.Tensor,
+    actions: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    old_values: torch.Tensor,
+    advantages: torch.Tensor,
+    returns: torch.Tensor,
+    clip_epsilon: float = 0.2,
+    value_coef: float = 0.5,
+    entropy_coef: float = 0.01,
+    clip_value: bool = True
+) -> tuple[torch.Tensor, dict]:
+    """
+    Compute the complete PPO loss.
+
+    Returns:
+        total_loss: Combined loss to minimize
+        info: Dictionary with individual loss components
+    """
+    # Get current policy outputs
+    _, new_log_probs, entropy, new_values = model.get_action_and_value(states, actions)
+
+    # ==================== ACTOR LOSS ====================
+    # Probability ratio
+    ratio = torch.exp(new_log_probs - old_log_probs)
+
+    # Clipped surrogate objective
+    surr1 = ratio * advantages
+    surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
+
+    # Actor loss (negative because we minimize)
+    actor_loss = -torch.mean(torch.min(surr1, surr2))
+
+    # ==================== CRITIC LOSS ====================
+    if clip_value:
+        # Clipped value loss
+        value_pred_clipped = old_values + torch.clamp(
+            new_values - old_values, -clip_epsilon, clip_epsilon
+        )
+        value_loss1 = F.mse_loss(new_values, returns, reduction='none')
+        value_loss2 = F.mse_loss(value_pred_clipped, returns, reduction='none')
+        critic_loss = 0.5 * torch.mean(torch.max(value_loss1, value_loss2))
+    else:
+        # Simple MSE loss
+        critic_loss = 0.5 * F.mse_loss(new_values, returns)
+
+    # ==================== ENTROPY BONUS ====================
+    entropy_loss = -torch.mean(entropy)  # Negative to maximize entropy
+
+    # ==================== TOTAL LOSS ====================
+    total_loss = actor_loss + value_coef * critic_loss + entropy_coef * entropy_loss
+
+    # Info for logging
+    info = {
+        'actor_loss': actor_loss.item(),
+        'critic_loss': critic_loss.item(),
+        'entropy': -entropy_loss.item(),  # Report positive entropy
+        'total_loss': total_loss.item(),
+        'ratio_mean': ratio.mean().item(),
+        'ratio_min': ratio.min().item(),
+        'ratio_max': ratio.max().item(),
+        'clip_fraction': ((ratio - 1.0).abs() > clip_epsilon).float().mean().item()
+    }
+
+    return total_loss, info
+```
+
+---
+
+#### Why Each Component Matters: Ablation Analysis
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    EFFECT OF REMOVING EACH COMPONENT                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Without Clipping (vanilla policy gradient):
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Problem: Large policy updates → performance collapse                       │
+│  Symptom: Training starts well, then suddenly crashes                       │
+│  Why: Single bad update can push policy far from good region               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Without Value Function (no critic):
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Problem: High variance advantage estimates                                 │
+│  Symptom: Noisy training, slow convergence                                  │
+│  Why: Must use Monte Carlo returns instead of TD estimates                 │
+│  This is essentially REINFORCE with clipping                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Without Entropy Bonus:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Problem: Premature convergence to suboptimal deterministic policy          │
+│  Symptom: Policy stops exploring, gets stuck in local optima               │
+│  Why: No incentive to maintain action diversity                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### Hyperparameter Sensitivity
+
+| Hyperparameter | Typical Range | Effect if Too Low | Effect if Too High |
+|----------------|---------------|-------------------|---------------------|
+| $\epsilon$ (clip) | 0.1 - 0.3 | Too conservative, slow learning | Unstable, defeats purpose of PPO |
+| $c_1$ (value coef) | 0.5 - 1.0 | Poor value estimates, high variance | Critic dominates, actor underfits |
+| $c_2$ (entropy coef) | 0.001 - 0.05 | Premature convergence | Policy stays random |
+| K (epochs) | 3 - 10 | Underutilizes data | Overfitting to old data |
+| Minibatch size | 32 - 512 | Noisy gradients | Slow updates, memory issues |
+| $\gamma$ (discount) | 0.95 - 0.999 | Myopic behavior | Hard credit assignment |
+| $\lambda$ (GAE) | 0.9 - 0.99 | High bias | High variance |
+
+---
+
 ### Token-Level vs Response-Level
 
 PPO for LLM can operate at different granularities:

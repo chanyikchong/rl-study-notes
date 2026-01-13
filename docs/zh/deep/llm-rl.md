@@ -289,6 +289,426 @@ for iteration = 1, 2, ... do:
 ─────────────────────────────────────────────────────────
 ```
 
+### 完整的PPO Actor-Critic目标函数（深入讲解）
+
+完整的PPO目标将**三个组件**组合成一个损失函数：
+
+$$L^{PPO}(\theta, \phi) = L^{CLIP}(\theta) - c_1 L^{VF}(\phi) + c_2 S[\pi_\theta]$$
+
+其中：
+- $L^{CLIP}(\theta)$：**Actor损失**（通过截断代理进行策略改进）
+- $L^{VF}(\phi)$：**Critic损失**（价值函数准确性）
+- $S[\pi_\theta]$：**熵奖励**（鼓励探索）
+- $c_1, c_2$：超参数系数（通常$c_1 = 0.5$，$c_2 = 0.01$）
+
+让我们详细分解每个组件。
+
+---
+
+#### 组件1：Actor损失 $L^{CLIP}(\theta)$ — 策略改进
+
+$$L^{CLIP}(\theta) = \mathbb{E}_t \left[ \min\left( r_t(\theta) \hat{A}_t, \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon) \hat{A}_t \right) \right]$$
+
+**目的**：通过增加好动作（正优势）的概率和减少坏动作（负优势）的概率来改进策略，同时使用截断保证稳定性。
+
+**组件解释**：
+
+| 符号 | 含义 | 公式 |
+|------|------|------|
+| $r_t(\theta)$ | 概率比 | $\frac{\pi_\theta(a_t \| s_t)}{\pi_{\theta_{old}}(a_t \| s_t)}$ |
+| $\hat{A}_t$ | 估计优势 | 通常GAE：$\sum_{l=0}^{\infty}(\gamma\lambda)^l \delta_{t+l}$ |
+| $\epsilon$ | 截断范围 | 通常0.1或0.2 |
+
+**为什么是最大化（不是最小化）？** 我们想**最大化**期望优势加权回报。在代码中，我们通常取负来创建要最小化的损失：
+
+```python
+# 实践中，我们最小化负值
+actor_loss = -L_CLIP  # 最小化负值 = 最大化
+```
+
+**截断机制详解**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    截断如何创建"悲观"界限                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+对于每个具有优势A的(状态, 动作)对：
+
+如果 A > 0（好动作 → 想增加概率）：
+┌────────────────────────────────────────────────────────────────────────────┐
+│  未截断: r(θ) · A      →  随着π_θ(a|s)增加而增加                           │
+│  截断:   (1+ε) · A     →  常数上限                                        │
+│                                                                            │
+│  min(未截断, 截断):                                                        │
+│    - 当 r < 1+ε: 使用未截断（梯度推动概率上升）                             │
+│    - 当 r > 1+ε: 使用截断（无梯度，停止推动）                               │
+│                                                                            │
+│  结果: 概率可以增加，但目标在比率超过1+ε后停止改进。防止过冲。              │
+└────────────────────────────────────────────────────────────────────────────┘
+
+如果 A < 0（坏动作 → 想减少概率）：
+┌────────────────────────────────────────────────────────────────────────────┐
+│  未截断: r(θ) · A      →  r·A是负的，随着π_θ(a|s)减少                      │
+│                           变得"更少负"（更好）                              │
+│  截断:   (1-ε) · A     →  常数下限（可能达到的最小负值）                    │
+│                                                                            │
+│  min(未截断, 截断):                                                        │
+│    - 当 r > 1-ε: 使用未截断（梯度推动概率下降）                             │
+│    - 当 r < 1-ε: 使用截断（无梯度，停止推动）                               │
+│                                                                            │
+│  结果: 概率可以减少，但目标在比率低于1-ε后停止改进。防止过度抑制。          │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+**数学直觉**：min()操作创建了真实目标的**悲观下界**。我们只在截断边界内获得改进的信用。
+
+---
+
+#### 组件2：Critic损失 $L^{VF}(\phi)$ — 价值函数准确性
+
+$$L^{VF}(\phi) = \mathbb{E}_t \left[ \left( V_\phi(s_t) - V_t^{target} \right)^2 \right]$$
+
+**目的**：训练价值函数（critic）准确预测期望回报，这对计算好的优势估计至关重要。
+
+**什么是$V_t^{target}$？** 目标值来自实际经验：
+
+$$V_t^{target} = \hat{A}_t + V_{\phi_{old}}(s_t)$$
+
+或等效地，使用回报：
+
+$$V_t^{target} = \hat{R}_t = \sum_{l=0}^{T-t} \gamma^l r_{t+l}$$
+
+**为什么用平方误差？** 简单，易理解，实践中效果好。一些实现使用Huber损失来增强对异常值的鲁棒性。
+
+**可选：截断价值损失**
+
+一些实现也对价值函数更新进行截断以提高稳定性：
+
+$$L^{VF-CLIP}(\phi) = \mathbb{E}_t \left[ \max\left( (V_\phi - V^{target})^2, (V^{clip} - V^{target})^2 \right) \right]$$
+
+其中$V^{clip} = V_{\phi_{old}} + \text{clip}(V_\phi - V_{\phi_{old}}, -\epsilon, \epsilon)$
+
+```python
+# 截断价值损失实现
+v_pred = critic(states)
+v_pred_clipped = v_old + torch.clamp(v_pred - v_old, -clip_range, clip_range)
+
+loss_v1 = (v_pred - returns) ** 2
+loss_v2 = (v_pred_clipped - returns) ** 2
+
+critic_loss = 0.5 * torch.mean(torch.max(loss_v1, loss_v2))
+```
+
+**为什么也要截断critic？** 防止价值函数变化太剧烈，这可能会破坏后续epoch的优势估计稳定性。
+
+---
+
+#### 组件3：熵奖励 $S[\pi_\theta]$ — 探索
+
+$$S[\pi_\theta] = \mathbb{E}_t \left[ -\sum_a \pi_\theta(a|s_t) \log \pi_\theta(a|s_t) \right] = \mathbb{E}_t \left[ H(\pi_\theta(\cdot|s_t)) \right]$$
+
+**目的**：通过奖励保持不确定性的策略（不要过快变得太确定）来鼓励探索。
+
+**为什么熵很重要**：
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           熵与探索                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+高熵（有利于探索）：
+┌────────────────────────────────┐
+│  π(a₁|s) = 0.25               │
+│  π(a₂|s) = 0.25               │     H(π) = -4 × 0.25 × log(0.25) = 1.39
+│  π(a₃|s) = 0.25               │    （4个动作的最大值）
+│  π(a₄|s) = 0.25               │
+└────────────────────────────────┘
+
+低熵（利用，可能过早）：
+┌────────────────────────────────┐
+│  π(a₁|s) = 0.97               │
+│  π(a₂|s) = 0.01               │     H(π) ≈ 0.12
+│  π(a₃|s) = 0.01               │    （几乎确定性）
+│  π(a₄|s) = 0.01               │
+└────────────────────────────────┘
+
+熵奖励奖励高熵，防止在充分探索之前过早收敛到确定性策略。
+```
+
+**对于连续动作**（高斯策略）：
+
+$$S[\pi_\theta] = \mathbb{E}_t \left[ \frac{1}{2} \log(2\pi e \sigma^2) \right] = \frac{1}{2}(1 + \log(2\pi\sigma^2))$$
+
+熵取决于标准差$\sigma$。更大的$\sigma$ → 更多探索。
+
+**熵系数$c_2$**：
+- 太高：策略保持随机，无法利用好动作
+- 太低：策略过快变得确定性，可能收敛到次优行为
+- 典型值：离散动作0.01，连续动作0.001
+
+---
+
+#### 整合：组合损失
+
+$$L^{TOTAL}(\theta, \phi) = -L^{CLIP}(\theta) + c_1 L^{VF}(\phi) - c_2 S[\pi_\theta]$$
+
+注意符号（假设我们**最小化**损失）：
+- **负** $L^{CLIP}$：我们想最大化策略改进
+- **正** $L^{VF}$：我们想最小化价值预测误差
+- **负** $S$：我们想最大化熵（鼓励探索）
+
+**包含所有组件的完整算法**：
+
+```
+完整的PPO Actor-Critic训练循环：
+═══════════════════════════════════════════════════════════════════════════════
+
+输入: Actor π_θ, Critic V_φ, 系数c₁, c₂, 截断ε, epoch数K
+
+for iteration = 1, 2, ... do:
+
+    ┌─ 采集阶段 ──────────────────────────────────────────────────────────────┐
+    │                                                                         │
+    │  for t = 1 to T do:                                                     │
+    │      采样动作: a_t ~ π_θ_old(·|s_t)                                    │
+    │      存储: log π_θ_old(a_t|s_t), V_φ_old(s_t)                          │
+    │      执行动作，观察 r_t, s_{t+1}                                        │
+    │                                                                         │
+    │  使用GAE计算优势:                                                       │
+    │      δ_t = r_t + γV_φ_old(s_{t+1}) - V_φ_old(s_t)                      │
+    │      Â_t = Σ_{l=0}^{T-t} (γλ)^l δ_{t+l}                                │
+    │                                                                         │
+    │  计算回报:                                                              │
+    │      R̂_t = Â_t + V_φ_old(s_t)                                          │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      ▼
+    ┌─ 优化阶段（在相同数据上K个epoch）─────────────────────────────────────────┐
+    │                                                                         │
+    │  for epoch = 1 to K do:                                                 │
+    │      for minibatch in shuffle(collected_data) do:                       │
+    │                                                                         │
+    │          ┌─ ACTOR损失 ───────────────────────────────────────────────┐  │
+    │          │  log π_θ_new = actor.log_prob(actions)                    │  │
+    │          │  ratio = exp(log π_θ_new - log π_θ_old)                   │  │
+    │          │                                                           │  │
+    │          │  surr1 = ratio × Â                                        │  │
+    │          │  surr2 = clip(ratio, 1-ε, 1+ε) × Â                        │  │
+    │          │  L_actor = -mean(min(surr1, surr2))                       │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ CRITIC损失 ──────────────────────────────────────────────┐  │
+    │          │  V_pred = critic(states)                                  │  │
+    │          │  L_critic = mean((V_pred - R̂)²)                          │  │
+    │          │                                                           │  │
+    │          │  # 可选：截断价值损失                                      │  │
+    │          │  V_clipped = V_old + clip(V_pred - V_old, -ε, ε)         │  │
+    │          │  L_critic = mean(max((V_pred-R̂)², (V_clipped-R̂)²))      │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ 熵奖励 ──────────────────────────────────────────────────┐  │
+    │          │  entropy = actor.entropy(states)                          │  │
+    │          │  L_entropy = -mean(entropy)  # 负号以最大化               │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    │          ┌─ 总损失 ──────────────────────────────────────────────────┐  │
+    │          │  L_total = L_actor + c₁ × L_critic + c₂ × L_entropy       │  │
+    │          │                                                           │  │
+    │          │  optimizer.zero_grad()                                    │  │
+    │          │  L_total.backward()                                       │  │
+    │          │  optimizer.step()                                         │  │
+    │          └───────────────────────────────────────────────────────────┘  │
+    │                                                                         │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+---
+
+#### 完整PyTorch实现
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.distributions import Categorical, Normal
+
+class PPOActorCritic(nn.Module):
+    """PPO的组合Actor-Critic网络。"""
+
+    def __init__(self, state_dim, action_dim, hidden_dim=64, continuous=False):
+        super().__init__()
+        self.continuous = continuous
+
+        # 共享特征提取器（可选，可以分开）
+        self.shared = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh()
+        )
+
+        # Actor头
+        if continuous:
+            self.actor_mean = nn.Linear(hidden_dim, action_dim)
+            self.actor_log_std = nn.Parameter(torch.zeros(action_dim))
+        else:
+            self.actor = nn.Linear(hidden_dim, action_dim)
+
+        # Critic头
+        self.critic = nn.Linear(hidden_dim, 1)
+
+    def forward(self, state):
+        features = self.shared(state)
+        value = self.critic(features)
+
+        if self.continuous:
+            mean = self.actor_mean(features)
+            std = self.actor_log_std.exp()
+            return mean, std, value
+        else:
+            logits = self.actor(features)
+            return logits, value
+
+    def get_action_and_value(self, state, action=None):
+        """获取动作、log_prob、熵和价值。"""
+        if self.continuous:
+            mean, std, value = self.forward(state)
+            dist = Normal(mean, std)
+            if action is None:
+                action = dist.sample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            entropy = dist.entropy().sum(dim=-1)
+        else:
+            logits, value = self.forward(state)
+            dist = Categorical(logits=logits)
+            if action is None:
+                action = dist.sample()
+            log_prob = dist.log_prob(action)
+            entropy = dist.entropy()
+
+        return action, log_prob, entropy, value.squeeze(-1)
+
+
+def compute_ppo_loss(
+    model: PPOActorCritic,
+    states: torch.Tensor,
+    actions: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    old_values: torch.Tensor,
+    advantages: torch.Tensor,
+    returns: torch.Tensor,
+    clip_epsilon: float = 0.2,
+    value_coef: float = 0.5,
+    entropy_coef: float = 0.01,
+    clip_value: bool = True
+) -> tuple[torch.Tensor, dict]:
+    """
+    计算完整的PPO损失。
+
+    返回:
+        total_loss: 要最小化的组合损失
+        info: 包含各个损失组件的字典
+    """
+    # 获取当前策略输出
+    _, new_log_probs, entropy, new_values = model.get_action_and_value(states, actions)
+
+    # ==================== ACTOR损失 ====================
+    # 概率比
+    ratio = torch.exp(new_log_probs - old_log_probs)
+
+    # 截断代理目标
+    surr1 = ratio * advantages
+    surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
+
+    # Actor损失（负号因为我们最小化）
+    actor_loss = -torch.mean(torch.min(surr1, surr2))
+
+    # ==================== CRITIC损失 ====================
+    if clip_value:
+        # 截断价值损失
+        value_pred_clipped = old_values + torch.clamp(
+            new_values - old_values, -clip_epsilon, clip_epsilon
+        )
+        value_loss1 = F.mse_loss(new_values, returns, reduction='none')
+        value_loss2 = F.mse_loss(value_pred_clipped, returns, reduction='none')
+        critic_loss = 0.5 * torch.mean(torch.max(value_loss1, value_loss2))
+    else:
+        # 简单MSE损失
+        critic_loss = 0.5 * F.mse_loss(new_values, returns)
+
+    # ==================== 熵奖励 ====================
+    entropy_loss = -torch.mean(entropy)  # 负号以最大化熵
+
+    # ==================== 总损失 ====================
+    total_loss = actor_loss + value_coef * critic_loss + entropy_coef * entropy_loss
+
+    # 用于日志的信息
+    info = {
+        'actor_loss': actor_loss.item(),
+        'critic_loss': critic_loss.item(),
+        'entropy': -entropy_loss.item(),  # 报告正熵
+        'total_loss': total_loss.item(),
+        'ratio_mean': ratio.mean().item(),
+        'ratio_min': ratio.min().item(),
+        'ratio_max': ratio.max().item(),
+        'clip_fraction': ((ratio - 1.0).abs() > clip_epsilon).float().mean().item()
+    }
+
+    return total_loss, info
+```
+
+---
+
+#### 为什么每个组件都重要：消融分析
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        移除每个组件的效果                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+没有截断（普通策略梯度）：
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  问题: 大的策略更新 → 性能崩溃                                               │
+│  症状: 训练开始良好，然后突然崩溃                                            │
+│  原因: 单次坏的更新可能把策略推到远离好区域的地方                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+没有价值函数（无critic）：
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  问题: 优势估计方差高                                                        │
+│  症状: 训练噪声大，收敛慢                                                    │
+│  原因: 必须使用蒙特卡洛回报而不是TD估计                                      │
+│  这本质上是带截断的REINFORCE                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+没有熵奖励：
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  问题: 过早收敛到次优的确定性策略                                            │
+│  症状: 策略停止探索，陷入局部最优                                            │
+│  原因: 没有激励来维持动作多样性                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+#### 超参数敏感性
+
+| 超参数 | 典型范围 | 太低的影响 | 太高的影响 |
+|--------|---------|-----------|-----------|
+| $\epsilon$（截断） | 0.1 - 0.3 | 太保守，学习慢 | 不稳定，违背PPO目的 |
+| $c_1$（价值系数） | 0.5 - 1.0 | 价值估计差，方差高 | Critic主导，actor欠拟合 |
+| $c_2$（熵系数） | 0.001 - 0.05 | 过早收敛 | 策略保持随机 |
+| K（epoch数） | 3 - 10 | 数据利用不足 | 在旧数据上过拟合 |
+| Minibatch大小 | 32 - 512 | 梯度噪声大 | 更新慢，内存问题 |
+| $\gamma$（折扣） | 0.95 - 0.999 | 短视行为 | 信用分配困难 |
+| $\lambda$（GAE） | 0.9 - 0.99 | 偏差高 | 方差高 |
+
+---
+
 ### Token级 vs 响应级
 
 LLM的PPO可以在不同粒度上操作：
