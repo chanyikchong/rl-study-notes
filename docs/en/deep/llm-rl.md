@@ -306,6 +306,218 @@ $$L^{token}(\theta) = \sum_{t=1}^{T} \min\left( r_t(\theta) A_t, \text{clip}(r_t
 
 Where $r_t(\theta) = \frac{\pi_\theta(y_t|x, y_{<t})}{\pi_{old}(y_t|x, y_{<t})}$.
 
+### PPO Implementation FAQ: Common Confusions
+
+These are frequently asked questions about PPO implementation that cause confusion:
+
+#### Q1: Do we need to keep two separate actor models (old and new)?
+
+**No!** You only need **one actor model**. The "old" policy $\pi_{\theta_{old}}$ is not a separate model — it's just the **stored log probabilities** computed at sample collection time.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WHAT YOU STORE vs WHAT YOU COMPUTE                                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  At collection time:                                                    │
+│  ┌──────────────┐                                                       │
+│  │ Actor θ_old  │ → Generate samples → Store log π_old(a|s) as NUMBERS │
+│  └──────────────┘                                                       │
+│                                                                         │
+│  During training (same model, updated weights):                         │
+│  ┌──────────────┐                                                       │
+│  │ Actor θ_new  │ → Forward pass → Compute log π_new(a|s) ON THE FLY   │
+│  └──────────────┘                                                       │
+│                                                                         │
+│  ratio = exp(log π_new - log π_old)  ← Uses stored numbers!            │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**Memory efficient**: Store scalar log probabilities, not model copies.
+
+#### Q2: At the first training step, how is $\log \pi_{\theta_{new}}$ computed if we haven't updated yet?
+
+At the very first forward pass of training:
+- $\theta_{new} = \theta_{old}$ (same parameters)
+- $\log \pi_{new} = \log \pi_{old}$ (same values)
+- **Ratio $r(\theta) = 1$ exactly**
+
+As you perform gradient updates within the training loop, $\theta$ changes, so subsequent forward passes give different $\log \pi_{new}$ values.
+
+```python
+# Pseudocode showing the flow
+log_p_old = []  # Stored at collection
+
+# Collection phase
+for prompt in batch:
+    response = actor.generate(prompt)
+    log_p_old.append(actor.log_prob(response))  # Store these numbers
+
+# Training phase
+for epoch in range(K_epochs):
+    for minibatch in shuffle(samples):
+        # Forward pass with CURRENT weights (θ keeps changing)
+        log_p_new = actor.log_prob(minibatch.responses)  # Computed fresh
+
+        # Use STORED log_p_old (never changes within this iteration)
+        ratio = torch.exp(log_p_new - minibatch.log_p_old)
+
+        # ... compute loss and update θ
+        optimizer.step()  # θ changes here!
+        # Next minibatch: log_p_new will be different, log_p_old stays same
+```
+
+#### Q3: After multiple minibatch updates, which $\log \pi_{old}$ should be used?
+
+**Always use the log probabilities from collection time.** They never change during training.
+
+```
+Timeline:
+─────────────────────────────────────────────────────────────────────────
+
+Iteration i:
+┌─────────────┐
+│ Actor_i     │ ──→ Collect samples ──→ Store log_p_old (from Actor_i)
+└─────────────┘
+      │
+      │ Minibatch 1: Update → Actor_{i,1}
+      │ Minibatch 2: Update → Actor_{i,2}    All use SAME log_p_old
+      │ Minibatch 3: Update → Actor_{i,3}    (from Actor_i)
+      │ ...
+      │ Epoch K complete
+      ▼
+┌─────────────┐
+│ Actor_{i+1} │ ──→ Collect NEW samples ──→ Store NEW log_p_old
+└─────────────┘
+
+─────────────────────────────────────────────────────────────────────────
+```
+
+**Key insight**: `log_p_old` is tied to the samples, not the current model. When you collect new samples, you get new `log_p_old` values.
+
+#### Q4: After each epoch, do I recompute $\log \pi_{old}$ for all samples?
+
+**No!** You store `log_p_old` **once** at collection time. It stays fixed.
+
+| What | When Computed | How Often |
+|------|---------------|-----------|
+| `log_p_old` | At sample collection | **Once** per iteration |
+| `log_p_new` | During training forward pass | **Every minibatch** |
+
+```python
+# CORRECT implementation
+log_p_old = collect_and_store_log_probs(actor, prompts)  # Once!
+
+for epoch in range(K):
+    for mb in minibatches:
+        log_p_new = actor.log_prob(mb.responses)  # Fresh each time
+        ratio = exp(log_p_new - mb.log_p_old)     # log_p_old from storage
+        # ... update
+```
+
+#### Q5: So $\log \pi_{old}$ never updates during all epochs?
+
+**Correct!** Within one PPO iteration (all K epochs on the same batch of samples), `log_p_old` is **frozen**.
+
+```
+PPO Iteration Structure:
+─────────────────────────────────────────────────────────────────────────
+
+ ┌─ Collect samples with current policy ──────────────────────────────┐
+ │  Store: log_p_old, advantages, returns                             │
+ │  These are FROZEN for this entire iteration                        │
+ └────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+ ┌─ Training Loop ────────────────────────────────────────────────────┐
+ │                                                                    │
+ │  for epoch in range(K_epochs):        # K = 3-10 typically        │
+ │      for minibatch in shuffle(data):                               │
+ │          log_p_new = forward_pass()   # Changes each step         │
+ │          ratio = exp(log_p_new - log_p_old)  # log_p_old FIXED    │
+ │          loss = clipped_objective(ratio, advantages)               │
+ │          optimizer.step()             # θ updates                  │
+ │                                                                    │
+ │  # After K epochs, log_p_old may be very different from log_p_new │
+ │  # This is fine! Clipping prevents too large updates              │
+ └────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+ ┌─ Next Iteration ───────────────────────────────────────────────────┐
+ │  Collect NEW samples → Compute NEW log_p_old → Repeat              │
+ └────────────────────────────────────────────────────────────────────┘
+```
+
+#### Q6: When the ratio is clipped and selected as the minimum, how does gradient flow?
+
+**It doesn't!** When the clipped value is selected, the gradient is **zero**.
+
+$$L^{CLIP} = \min\left( \underbrace{r(\theta) A}_{\text{has gradient}}, \underbrace{\text{clip}(r(\theta), 1-\epsilon, 1+\epsilon) A}_{\text{constant when clipped}} \right)$$
+
+**Case analysis:**
+
+| Condition | Selected Value | Gradient |
+|-----------|----------------|----------|
+| $1-\epsilon < r < 1+\epsilon$ | $r \cdot A$ (unclipped) | $\nabla_\theta r \cdot A$ (non-zero) |
+| $r > 1+\epsilon$ and $A > 0$ | $(1+\epsilon) \cdot A$ | **0** (constant) |
+| $r < 1-\epsilon$ and $A < 0$ | $(1-\epsilon) \cdot A$ | **0** (constant) |
+
+```
+Gradient flow visualization:
+─────────────────────────────────────────────────────────────────────────
+
+When A > 0 (good action, want to increase probability):
+
+                gradient flows
+                     │
+    Loss             ▼
+      │    ┌─────────────────┐
+      │    │  r(θ) · A       │ ← selected when r < 1+ε
+      │    └────────┬────────┘
+      │             │
+      └──→ min() ───┤
+                    │
+           ┌────────┴────────┐
+           │ (1+ε) · A       │ ← selected when r > 1+ε (NO GRADIENT!)
+           └─────────────────┘
+                 constant
+
+─────────────────────────────────────────────────────────────────────────
+```
+
+**Mathematical reason**:
+$$\frac{\partial}{\partial \theta} \text{clip}(r(\theta), 1-\epsilon, 1+\epsilon) = \begin{cases} \frac{\partial r}{\partial \theta} & \text{if } 1-\epsilon < r < 1+\epsilon \\ 0 & \text{otherwise (clipped)} \end{cases}$$
+
+#### Q7: So when clipped and selected, the actor doesn't update for that sample?
+
+**Exactly right!** That's the core mechanism of PPO's stability.
+
+**Why this is good:**
+
+1. **Prevents catastrophic updates**: If the policy has already changed a lot ($r$ far from 1), stop pushing further
+2. **Self-limiting optimization**: Good actions get reinforced, but not infinitely
+3. **Stability**: Even with multiple epochs on same data, policy can't drift too far
+
+```
+Example scenario:
+─────────────────────────────────────────────────────────────────────────
+
+Initial: log_p_old = -2.0, A = +5.0 (good action)
+
+Epoch 1, Minibatch 1:
+  log_p_new = -1.8  →  r = exp(-1.8 - (-2.0)) = 1.22
+  r < 1+ε (1.2)?  No, 1.22 > 1.2  →  CLIPPED!
+  Gradient = 0, no update for this sample
+
+What happened? The policy already increased this action's probability
+enough in previous updates. Clipping says "that's enough, stop here."
+
+─────────────────────────────────────────────────────────────────────────
+```
+
+**This is why PPO is stable**: It automatically stops updating when the policy has changed "enough" from the collection policy.
+
 ---
 
 ## DPO: Direct Preference Optimization
